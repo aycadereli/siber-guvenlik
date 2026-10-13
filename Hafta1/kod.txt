@@ -1,0 +1,112 @@
+import os, time, hashlib
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from argon2.low_level import hash_secret_raw, Type
+
+def baslik(s):
+    print("\n" + "=" * 60)
+    print(s)
+    print("=" * 60)
+
+baslik("DENEY 2 - ECB vs CTR")
+
+W, H = 240, 240
+assert (W * H * 3) % 16 == 0
+
+px = bytearray()
+for y in range(H):
+    for x in range(W):
+        if 60 <= x < 180 and 60 <= y < 180:
+            px += bytes((230, 60, 60))
+        elif (x // 20) % 2 == 0:
+            px += bytes((245, 245, 245))
+        else:
+            px += bytes((30, 30, 30))
+plain = bytes(px)
+header = f"P6\n{W} {H}\n255\n".encode()
+
+with open("orijinal.ppm", "wb") as f:
+    f.write(header + plain)
+
+key = os.urandom(32)
+
+ecb = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+ecb_body = ecb.update(plain) + ecb.finalize()
+with open("sifreli_ecb.ppm", "wb") as f:
+    f.write(header + ecb_body)
+
+ctr = Cipher(algorithms.AES(key), modes.CTR(os.urandom(16))).encryptor()
+ctr_body = ctr.update(plain) + ctr.finalize()
+with open("sifreli_ctr.ppm", "wb") as f:
+    f.write(header + ctr_body)
+
+def tekil_blok(b):
+    return len(set(b[i:i+16] for i in range(0, len(b), 16)))
+print(f"Orijinalde farkli 16-bayt blok sayisi : {tekil_blok(plain)}")
+print(f"ECB ciktisinda farkli blok sayisi     : {tekil_blok(ecb_body)}")
+print(f"CTR ciktisinda farkli blok sayisi     : {tekil_blok(ctr_body)}")
+print("Olusan dosyalar: orijinal.ppm, sifreli_ecb.ppm, sifreli_ctr.ppm")
+
+baslik("DENEY 3 - CTR mesaji degistirme")
+
+mesaj = b"Tutar: 100 TL"
+k = os.urandom(32)
+nonce = os.urandom(16)
+
+enc = Cipher(algorithms.AES(k), modes.CTR(nonce)).encryptor()
+c = enc.update(mesaj) + enc.finalize()
+
+eski = b"100"
+yeni = b"999"
+ofset = mesaj.index(eski)
+c_bozuk = bytearray(c)
+for i in range(len(eski)):
+    c_bozuk[ofset + i] ^= eski[i] ^ yeni[i]
+
+dec = Cipher(algorithms.AES(k), modes.CTR(nonce)).decryptor()
+cozulen = dec.update(bytes(c_bozuk)) + dec.finalize()
+print(f"Orijinal mesaj  : {mesaj.decode()}")
+print(f"Saldiri sonrasi : {cozulen.decode()}")
+
+print("\n--- Ayni saldiri AES-GCM'e karsi ---")
+gkey = AESGCM.generate_key(bit_length=256)
+aes = AESGCM(gkey)
+gnonce = os.urandom(12)
+gc = aes.encrypt(gnonce, mesaj, None)
+
+gc_bozuk = bytearray(gc)
+for i in range(len(eski)):
+    gc_bozuk[ofset + i] ^= eski[i] ^ yeni[i]
+
+try:
+    aes.decrypt(gnonce, bytes(gc_bozuk), None)
+    print("GCM cozdu (BEKLENMEDIK)")
+except Exception as e:
+    print(f"GCM HATA verdi ve mesaji reddetti: {type(e).__name__}")
+
+baslik("DENEY 4 - SHA-256 vs Argon2id")
+
+parola = b"KullaniciParolasi123"
+salt = os.urandom(16)
+
+N = 100_000
+t0 = time.perf_counter()
+for _ in range(N):
+    hashlib.sha256(salt + parola).digest()
+t1 = time.perf_counter()
+sha_bir = (t1 - t0) / N
+print(f"SHA-256 tek hesaplama   : {sha_bir*1e6:.3f} mikrosaniye")
+print(f"SHA-256 saniyede        : {1/sha_bir:,.0f} hesaplama")
+
+t0 = time.perf_counter()
+hash_secret_raw(
+    secret=parola, salt=salt,
+    time_cost=3, memory_cost=65536, parallelism=4,
+    hash_len=32, type=Type.ID,
+)
+t1 = time.perf_counter()
+arg_bir = t1 - t0
+print(f"Argon2id tek hesaplama  : {arg_bir*1000:.1f} milisaniye")
+print(f"Argon2id saniyede       : {1/arg_bir:,.0f} hesaplama")
+
+print(f"\nArgon2id, SHA-256'dan ~{arg_bir/sha_bir:,.0f} kat yavas.")
